@@ -229,7 +229,7 @@ export default function TablePage({ username }: Props) {
   }
 
   useEffect(() => {
-    if (closed || !(admin || sittingOut)) return
+    if (closed || !players.length) return
     void loadBalances(players)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, admin, sittingOut, players.length, closed])
@@ -375,7 +375,7 @@ export default function TablePage({ username }: Props) {
               {p.mustPlace ? ' · waiting for a place' : ''}
             </div>
           </div>
-          {admin && typeof balances[p.uid] === 'number' && (
+          {typeof balances[p.uid] === 'number' && (admin || p.uid === username) && (
             <span className={`tiny ${balances[p.uid] < threshold ? 'neg' : ''}`}>
               {balances[p.uid]} pts
             </span>
@@ -418,7 +418,7 @@ export default function TablePage({ username }: Props) {
 
   if (notFound) {
     return (
-      <div className="app">
+      <div className="app game">
         <div className="topbar">
           <Link to="/" className="btn ghost sm">
             ← Back
@@ -434,7 +434,7 @@ export default function TablePage({ username }: Props) {
 
   if (!table || !g) {
     return (
-      <div className="app">
+      <div className="app game">
         <div className="topbar">
           <Link to="/" className="btn ghost sm">
             ← Back
@@ -452,7 +452,7 @@ export default function TablePage({ username }: Props) {
 
   if (isClosed(table)) {
     return (
-      <div className="app">
+      <div className="app game">
         <div className="topbar">
           <Link to="/" className="btn ghost sm">
             ←
@@ -489,7 +489,7 @@ export default function TablePage({ username }: Props) {
 
   if (!me) {
     return (
-      <div className="app">
+      <div className="app game">
         <div className="topbar">
           <Link to="/" className="btn ghost sm">
             ←
@@ -542,6 +542,18 @@ export default function TablePage({ username }: Props) {
       : 0
   const startStage =
     seconds >= 4 ? 'READY' : seconds > 0 ? String(seconds) : 'ROUND START'
+
+  /** My running net at this table: everything settled so far + the round in flight. */
+  const myStat = table.stats.find((s) => s.username === username)
+  const mySettled = myStat ? myStat.totalWon - myStat.totalLost : 0
+  const myInPlay = me.buyIn > 0 ? me.chips - me.buyIn : 0
+  const myNet = mySettled + myInPlay
+  const myNetText = `${myNet > 0 ? '+' : myNet < 0 ? '−' : ''}₹${Math.abs(myNet)}`
+  const won = !!winner && winner.uid === username
+  const myDelta = lastRound
+    ? (lastRound.players.find((r) => r.uid === username)?.delta ?? 0)
+    : 0
+  const deltaText = `${myDelta > 0 ? '+' : myDelta < 0 ? '−' : ''}₹${Math.abs(myDelta)}`
 
   const hubTitle = paused
     ? 'Paused'
@@ -652,7 +664,7 @@ export default function TablePage({ username }: Props) {
   </>)
 
   return (
-    <div className="app">
+    <div className="app game">
       <div className="topbar">
         <Link to="/" className="btn ghost sm">
           ←
@@ -663,6 +675,7 @@ export default function TablePage({ username }: Props) {
             code {table.code} · <b className={`statuspill s-${status.replace(/\s+/g, '').toLowerCase()}`}>{status}</b>
             {admin ? ' · you are admin' : ''}
             {sittingOut ? ' · you sit out this round' : ''}
+            <span className={`netlbl ${myNet >= 0 ? 'pos' : 'neg'}`}> · NET {myNetText}</span>
           </span>
         </h1>
         {admin && <button className="btn sm" onClick={() => setSheet('admin')}>Admin</button>}
@@ -774,6 +787,11 @@ export default function TablePage({ username }: Props) {
                 {!showChip && p.buyIn > 0 && (
                   <span className="chips" style={{ color: 'var(--muted)' }}>
                     •••
+                  </span>
+                )}
+                {p.uid === username && (
+                  <span className={`badge net ${myNet >= 0 ? 'pos' : 'neg'}`}>
+                    NET {myNetText}
                   </span>
                 )}
               </div>
@@ -1356,13 +1374,21 @@ export default function TablePage({ username }: Props) {
               d="M19 4h-3V2H8v2H5c-1.1 0-2 .9-2 2v2c0 2.42 1.87 4.42 4.25 4.9.54 1.54 1.77 2.77 3.31 3.3V19H7v2h10v-2h-4v-2.8c1.54-.53 2.77-1.76 3.31-3.3C19.13 12.42 21 10.42 21 8V6c0-1.1-.9-2-2-2zM5 8V6h2v3.82C5.84 9.4 5 8.76 5 8zm14 0c0 .76-.84 1.4-2 1.82V6h2v2z"
             />
           </svg>
-          <div className="cname">{winner.uid === username ? 'You win' : `${winner.username} wins`}</div>
-          <div className="camt">+₹{g.lastPot}</div>
+          <div className="cname">{won ? 'You win' : `${winner.username} wins`}</div>
+          <div className={`camt ${won ? 'pos' : myDelta < 0 ? 'neg' : 'mute'}`}>
+            {won ? `+₹${g.lastPot}` : deltaText}
+          </div>
+          <span className="cwon">
+            {won
+              ? `you took the ₹${g.lastPot} pot`
+              : `${winner.username} took the ₹${g.lastPot} pot`}
+          </span>
           {lastRound && (
             <div className="csum">
               {lastRound.players.map((p) => (
                 <span key={p.uid} className={p.delta > 0 ? 'pos' : p.delta < 0 ? 'neg' : ''}>
-                  {p.uid === username ? 'You' : p.username} {p.delta > 0 ? '+' : ''}₹{p.delta}
+                  {p.uid === username ? 'You' : p.username}{' '}
+                  {p.delta > 0 ? '+' : p.delta < 0 ? '−' : ''}₹{Math.abs(p.delta)}
                 </span>
               ))}
             </div>
