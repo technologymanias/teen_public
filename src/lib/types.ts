@@ -26,8 +26,6 @@ export interface Player {
   status: PlayerStatus
   isAdmin: boolean
   joinedAt: number
-  /** True once this seat has been credited its one-time joiner grant. */
-  funded: boolean
   /** True while the admin still has to pick this player's seat. */
   mustPlace?: boolean
   /** Blind chaals taken this round; the third one flips the player to SEEN. */
@@ -35,6 +33,22 @@ export interface Player {
 }
 
 export type Phase = 'lobby' | 'countdown' | 'playing' | 'roundEnded' | 'waiting' | 'closed'
+
+/**
+ * A show / side-show result the initiator has already decided, waiting for the
+ * other player to accept or decline it. Nothing in the round moves until they do.
+ */
+export interface PendingChoice {
+  kind: 'show' | 'sideshow'
+  by: string
+  byName: string
+  target: string
+  targetName: string
+  /** The player the initiator named as winner (show) or as out (side show). */
+  resultUid: string
+  resultName: string
+  at: number
+}
 
 export interface LogEntry {
   at: number
@@ -65,6 +79,8 @@ export interface GameState {
   endedBy: string | null
   /** One-shot table-wide announcement (e.g. "ALL PLAYERS ARE NOW SEEN"). */
   notice: string | null
+  /** Show / side-show result waiting on the other player's confirmation. */
+  pending: PendingChoice | null
   log: LogEntry[]
 }
 
@@ -155,6 +171,10 @@ export type Action =
   /** Names the winner and settles. Legal from `roundEnded`, or in a heads-up show. */
   | { type: 'selectWinner'; uid: string; winnerUid: string }
   | { type: 'topup'; uid: string; targetUid: string; amount: number }
+  /** Names the result of a heads-up show or side show and waits for the other player. */
+  | { type: 'propose'; uid: string; kind: 'show' | 'sideshow'; targetUid: string; resultUid: string }
+  /** The other player confirms or declines a pending show / side show. */
+  | { type: 'resolve'; uid: string; accept: boolean }
   | { type: 'pause'; uid: string }
   | { type: 'resume'; uid: string }
   | { type: 'close'; uid: string }
@@ -179,6 +199,8 @@ export interface UserStats {
   totalAllocated: number
   totalWon: number
   totalLost: number
+  /** Points an admin has added to this account from the dashboard. */
+  totalFunded: number
 }
 
 export interface UserDoc {

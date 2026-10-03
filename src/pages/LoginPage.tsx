@@ -43,7 +43,7 @@ export default function LoginPage() {
     <div className="app">
       <div className="auth">
         <div>
-          <div className="logo brand">Teen Patti Points</div>
+          <div className="logo brand">Game Points</div>
           <div className="sub">Local points tracker for physical-card games</div>
         </div>
 

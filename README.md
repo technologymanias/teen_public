@@ -1,6 +1,6 @@
-# Teen Patti Points
+# Game Points
 
-A mobile-first web app for tracking points during a physical-card Teen Patti game. Cards stay in
+A mobile-first web app for tracking points during a physical-card game. Cards stay in
 your hands — the app only tracks bets, the pot, whose turn it is, and each player's balance.
 
 Static build, hostable on GitHub Pages.
@@ -27,14 +27,17 @@ VITE_FIREBASE_PROJECT_ID=your-project
 VITE_FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
 VITE_FIREBASE_MESSAGING_SENDER_ID=...
 VITE_FIREBASE_APP_ID=...
+# Comma-separated usernames allowed to add points to other accounts (optional —
+# you can also hardcode them in src/lib/admins.ts).
+VITE_ADMIN_USERNAMES=yourname
 ```
 
 7. **Security rules** — `firestore.rules` is committed to this repo. Publish it with the Firebase
    CLI from the project root. Note that `users/{username}` allows **any signed-in player to update**
-   a profile: settling a pot, topping someone up or granting joiner points all write the affected
-   players' profiles from whichever client drove the action. Only `create`/`delete` are restricted
-   to the owner, so nobody can squat a name. Anyone signed in can also write `tables/{code}` — this
-   is a friends app, not a hostile-multiplayer one.
+   a profile: settling a pot, topping someone up or an admin funding an account all write the
+   affected players' profiles from whichever client drove the action. Only `create`/`delete` are
+   restricted to the owner, so nobody can squat a name. Anyone signed in can also write
+   `tables/{code}` — this is a friends app, not a hostile-multiplayer one.
 
 ```bash
 firebase deploy --only firestore:rules --project <your-project>
@@ -90,9 +93,9 @@ The workflow in `.github/workflows/deploy.yml` typechecks, runs the tests, build
 
 1. **Sign up** with a username (3–20 chars: `a-z`, `0-9`, `_`) and a password (min 6 characters).
    New accounts start at **0 points** — a balance is just your running won-minus-lost.
-2. **Create a table** → you get a **6-digit code**, and you're credited the table's **points for new
-   joiners** (default 100) on your account. Others **Join** with that code and get the same credit,
-   once per table.
+2. **Create a table** → you get a **6-digit code**, and others **Join** with that code. Sitting
+   down never credits points: every account starts at **0** and an admin adds points to it from
+   the dashboard. Nobody can play until they're above the table's floor.
 3. Admin presses **Start game** → a **5 second countdown** that plays **READY → 3 → 2 → 1 → ROUND
    START** over the felt → cards fly out to every seat **one pass at a time, three passes each**, and
    the **boot / dabba** (default 10) from every eligible player drops into the centre.
@@ -155,7 +158,9 @@ Open the **Admin** panel from the table header:
 - **Table config** — starting amount, boot / dabba, base point, double-every-N-rounds,
   blind-closes-after-N-rounds, max players, side show on/off, and who sees the **chips** and
   **config**. Locked while a round is in play. Changing config restarts the 10-second wait.
-- **Stop the table** — closes it for everyone. A round in progress is abandoned and nobody scores.
+- **Stop the table** — first shows a **full summary** of every player's current balance and their
+  net at this table; only after you confirm does the table actually close for everyone. A round in
+  progress is abandoned and nobody scores.
 - **Arrange seats** — in the lobby, every row has **↑ ↓** buttons that swap a player with the
   neighbour above or below. This sets the order play travels around the table, so set it before you
   start. The same list is available between rounds under **Arrange seats for the next round**.
@@ -171,13 +176,24 @@ by default). Below that they are marked **sitting out** for that round — no bo
 up during the 10-second wait and they play; if the timer runs out first, they sit it out and play
 the next one.
 
+### Funding accounts
+
+Nobody earns points just by turning up. Every account starts at **0**, joining a table credits
+nothing, and creating a table credits nothing — the only way a balance grows outside a round is an
+admin adding points.
+
+If your username is in `src/lib/admins.ts` (or `VITE_ADMIN_USERNAMES`), your dashboard shows an
+**Add points to a player** card: type a username or tap one of the people you share tables with,
+enter the amount, and their balance goes up immediately. The card also tells you how many points
+you've added in total.
+
 ### Points & history
 
-Joining a table credits its **points for joiners** to your balance once. Each round hands out chips
+Points are funded from the dashboard, never by joining a table. Each round hands out chips
 (separate from your balance) and the table settles by **delta only**, so every round is
 **zero-sum**. Your dashboard tracks **balance, games, wins, losses, points played, total won, total
-lost**, plus a per-game history (last 100 games) with the table, pot, headcount and your
-+/- for that round.
+lost, points added by an admin**, plus a per-game history (last 100 games) with the table, pot,
+headcount and your +/- for that round.
 
 ### Round history
 

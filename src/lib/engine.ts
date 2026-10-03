@@ -59,6 +59,7 @@ export function newGame(baseUnit: number): GameState {
     roundStartedAt: 0,
     endedBy: null,
     notice: null,
+    pending: null,
     log: [],
   }
 }
@@ -89,7 +90,6 @@ export function makeTable(
         status: 'active',
         isAdmin: true,
         joinedAt: Date.now(),
-        funded: true,
       },
     ],
     game: newGame(config.baseUnit),
@@ -148,6 +148,8 @@ export function minBetFor(table: TableDoc, player: Player): number {
 export function canAct(table: TableDoc, uid: string): boolean {
   const g = table.game
   if (g.paused || g.phase !== 'playing' || g.turnUid !== uid) return false
+  // A pending show freezes everyone until the other player answers it.
+  if (g.pending) return false
   const p = byUid(table, uid)
   return !!p && p.status === 'active'
 }
@@ -293,6 +295,7 @@ function settleInternal(table: TableDoc, winnerUid: string | null, effects: Side
   g.turnUid = null
   g.endedBy = null
   g.notice = null
+  g.pending = null
 
   const scored = table.players.filter((p) => p.buyIn > 0)
   const rows: SettlePlayer[] = scored.map((p) => {
@@ -368,6 +371,8 @@ const PAUSE_SAFE: ReadonlySet<Action['type']> = new Set([
   'close',
   'topup',
   'join',
+  'propose',
+  'resolve',
 ])
 
 export function applyAction(
@@ -385,6 +390,7 @@ export function applyAction(
       roundStartedAt: input.game.roundStartedAt || 0,
       endedBy: input.game.endedBy ?? null,
       notice: input.game.notice ?? null,
+      pending: input.game.pending ?? null,
       log: [...input.game.log],
     },
     stats: input.stats.map((s) => ({ ...s })),
@@ -415,30 +421,22 @@ export function applyAction(
       if (seatedCount >= table.config.maxPlayers)
         return fail(`Table is full (${table.config.maxPlayers}).`)
       const midRound = g.phase === 'playing'
-      const already = table.players.find((p) => p.uid === action.uid)
-      const grant = !already || !already.funded
       const player: Player = {
         uid: action.uid,
         username: action.username,
         seat: nextFreeSeat(table),
-        chips: midRound ? 0 : table.config.joinerPoints,
+        chips: 0,
         buyIn: 0,
         seen: false,
         blindTurns: 0,
         status: midRound ? 'sittingOut' : 'active',
         isAdmin: false,
         joinedAt: Date.now(),
-        funded: true,
       }
       // Written only when true — Firestore rejects `undefined` field values.
       if (g.phase !== 'lobby') player.mustPlace = true
       table.players.push(player)
       if (!table.memberUids.includes(action.uid)) table.memberUids = [...table.memberUids, action.uid]
-      if (grant)
-        effects.push({
-          type: 'grant',
-          entries: [{ username: action.username, amount: table.config.joinerPoints, creditBalance: true }],
-        })
       log(
         g,
         midRound
@@ -561,6 +559,93 @@ export function applyAction(
       return { table, effects }
     }
 
+    case 'propose': {
+      const caller = byUid(table, action.uid)
+      if (!caller) return fail('Not at this table.')
+      if (g.pending) return fail('A result is already waiting to be confirmed.')
+      if (g.phase !== 'playing') return fail('No round in progress.')
+      if (!canAct(table, action.uid)) return fail('Not your turn.')
+      const result = byUid(table, action.resultUid)
+      if (!result || result.status !== 'active') return fail('Pick an active player.')
+
+      let targetUid: string
+      if (action.kind === 'show') {
+        const inPlay = active(table)
+        if (inPlay.length !== 2) return fail('A show only has two players left.')
+        const other = inPlay.find((x) => x.uid !== action.uid)
+        if (!other) return fail('Nobody to show against.')
+        if (action.targetUid !== other.uid) return fail('You can only show against the other player.')
+        if (result.uid !== action.uid && result.uid !== other.uid)
+          return fail('Pick one of the two players.')
+        targetUid = other.uid
+      } else {
+        if (!table.config.sideshow) return fail('Side show is disabled at this table.')
+        const inPlay = active(table)
+        if (inPlay.length < 3) return fail('Side show needs 3 or more players.')
+        const target = sideShowTarget(table, action.uid)
+        if (!target) return fail('No valid side show target.')
+        if (action.targetUid !== target.uid)
+          return fail('You can only side show with the previous player.')
+        if (result.uid !== action.uid && result.uid !== target.uid)
+          return fail('Pick one of the two players.')
+        targetUid = target.uid
+      }
+
+      const target = byUid(table, targetUid)!
+      g.pending = {
+        kind: action.kind,
+        by: action.uid,
+        byName: caller.username,
+        target: targetUid,
+        targetName: target.username,
+        resultUid: result.uid,
+        resultName: result.username,
+        at: Date.now(),
+      }
+      log(
+        g,
+        action.kind === 'show'
+          ? `${caller.username} called a show — waiting on ${target.username}.`
+          : `${caller.username} asked ${target.username} for a side show.`
+      )
+      return { table, effects }
+    }
+
+    case 'resolve': {
+      const pending = g.pending
+      if (!pending) return fail('There is nothing waiting to be confirmed.')
+      const fromTarget = action.uid === pending.target
+      const fromCaller = action.uid === pending.by
+      if (!fromTarget && !fromCaller) return fail('You are not part of this.')
+      // Only the player on the receiving end may accept; the caller may withdraw.
+      if (fromCaller && action.accept) return fail('Only the other player can accept this.')
+
+      if (!action.accept) {
+        g.pending = null
+        log(
+          g,
+          fromCaller
+            ? `${pending.byName} withdrew the ${pending.kind === 'show' ? 'show' : 'side show'}.`
+            : `${pending.targetName} declined the ${pending.kind === 'show' ? 'show' : 'side show'}.`
+        )
+        return { table, effects }
+      }
+
+      const inner: Action =
+        pending.kind === 'show'
+          ? { type: 'selectWinner', uid: pending.by, winnerUid: pending.resultUid }
+          : { type: 'sideshow', uid: pending.by, loserUid: pending.resultUid }
+      // Drop the hold first — `canAct` refuses to act while one is up.
+      const res = applyAction(
+        { ...table, game: { ...table.game, pending: null } },
+        inner,
+        balances
+      )
+      // Keep the offer up if the settlement itself could not go through.
+      if (res.error) return { table, effects: [], error: res.error }
+      return res
+    }
+
     case 'pause': {
       if (!isAdmin(table, action.uid)) return fail('Only the admin can pause the table.')
       if (g.phase === 'roundEnded') return fail('Pick a winner before pausing the table.')
@@ -595,6 +680,7 @@ export function applyAction(
       g.turnUid = null
       g.countdownEndsAt = null
       g.waitEndsAt = null
+      g.pending = null
       table.players = table.players.map((p) => ({ ...p, chips: 0, buyIn: 0 }))
       table.closedAt = Date.now()
       log(g, abandoned ? 'Admin stopped the table — the round was abandoned.' : 'Admin stopped the table.')
@@ -705,6 +791,7 @@ export function applyAction(
       g.roundStartedAt = Date.now()
       g.endedBy = null
       g.notice = null
+      g.pending = null
       for (const b of boots) pushChaal(table, 'boot', b.uid, b.username, b.amount)
       const first = seated(table).find((p) => p.status === 'active')
       g.turnUid = first ? first.uid : null
@@ -804,6 +891,7 @@ export function applyAction(
       g.phase = 'roundEnded'
       g.endedBy = action.uid
       g.turnUid = null
+      g.pending = null
       log(g, `${p.username} stopped the round — the winner is still to be picked.`)
       return { table, effects }
     }

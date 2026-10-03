@@ -29,6 +29,8 @@ type Sheet =
   | 'topup'
   | 'turn'
   | 'place'
+  | 'summary'
+  | 'propose'
 
 interface Coin {
   id: number
@@ -69,6 +71,10 @@ export default function TablePage({ username }: Props) {
   const [deals, setDeals] = useState<Coin[]>([])
   const [balances, setBalances] = useState<Record<string, number>>({})
   const [topupAmounts, setTopupAmounts] = useState<Record<string, number>>({})
+  /** Balance snapshot taken just before the admin closes the table. */
+  const [closingBalances, setClosingBalances] = useState<Record<string, number>>({})
+  /** Live balances for the summary shown once the table is closed. */
+  const [finalBalances, setFinalBalances] = useState<Record<string, number>>({})
   const lastErr = useRef<string | null>(null)
   const coinId = useRef(1)
   const dealId = useRef(1)
@@ -141,6 +147,23 @@ export default function TablePage({ username }: Props) {
     [admin, players, balances, threshold]
   )
 
+  /**
+   * Points each player has already put into the round in flight. The per-chaal
+   * ledger records every boot and bet with a timestamp, so everything written
+   * since the round was dealt is this round's money — the round counter itself
+   * restarts at 1 every round, so it cannot be used to filter.
+   */
+  const putIn = useMemo(() => {
+    const out: Record<string, number> = {}
+    const since = g?.roundStartedAt ?? 0
+    if (!table || !since || (phase !== 'playing' && phase !== 'roundEnded')) return out
+    for (const r of table.actionHistory) {
+      if (r.at < since || !r.amount) continue
+      out[r.uid] = (out[r.uid] ?? 0) + r.amount
+    }
+    return out
+  }, [table, g, phase])
+
   useEffect(() => {
     if (myTurn) setBet(clampBet(min))
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -177,7 +200,22 @@ export default function TablePage({ username }: Props) {
   useEffect(() => {
     if (sheet === 'turn' && !myTurn) setSheet(null)
     else if (sheet === 'place' && !pendingPlace.length) setSheet(null)
-  }, [sheet, myTurn, pendingPlace.length])
+    else if (sheet === 'propose' && (!g?.pending || g.pending.target !== username))
+      setSheet(null)
+  }, [sheet, myTurn, pendingPlace.length, g?.pending])
+
+  // The player on the receiving end of a show / side show has to answer it.
+  const answered = useRef<string | null>(null)
+  useEffect(() => {
+    const p = g?.pending
+    if (!p || p.target !== username) return
+    if (sheet !== null || answered.current === String(p.at)) return
+    answered.current = String(p.at)
+    setSheet('propose')
+  }, [g?.pending, sheet, username])
+  useEffect(() => {
+    if (!g?.pending) answered.current = null
+  }, [g?.pending])
 
   useEffect(() => {
     if (!err || err === lastErr.current) return
@@ -233,6 +271,66 @@ export default function TablePage({ username }: Props) {
     void loadBalances(players)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, admin, sittingOut, players.length, closed])
+
+  /** Everyone who ever took a seat, de-duplicated and in seat order. */
+  const everyone = useMemo(() => {
+    if (!table) return []
+    const byUid = new Map<string, Player>()
+    for (const p of table.players) {
+      const prev = byUid.get(p.uid)
+      if (!prev || prev.status === 'left') byUid.set(p.uid, p)
+    }
+    return [...byUid.values()].sort((a, b) => a.seat - b.seat)
+  }, [table])
+
+  /** One summary line per player: their balance right now, plus their net here. */
+  function summaryRows(map: Record<string, number>) {
+    return everyone
+      .map((p) => {
+        const s = table?.stats.find((x) => x.username === p.username)
+        return {
+          uid: p.uid,
+          username: p.username,
+          left: p.status === 'left',
+          you: p.uid === username,
+          balance: typeof map[p.uid] === 'number' ? map[p.uid] : null,
+          net: s ? s.totalWon - s.totalLost : 0,
+        }
+      })
+      .sort((a, b) => (b.balance ?? Number.NEGATIVE_INFINITY) - (a.balance ?? Number.NEGATIVE_INFINITY))
+  }
+
+  // The closed screen shows everyone's final balance, so it reads them once.
+  useEffect(() => {
+    if (!closed || !everyone.length) return
+    let alive = true
+    void (async () => {
+      try {
+        const map = await getBalances(everyone.map((p) => p.uid))
+        if (alive) setFinalBalances(map)
+      } catch {
+        /* balances are informational only */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [closed, everyone])
+
+  /** Snapshot every balance, then open the summary — the table is still open. */
+  async function openSummary() {
+    setErr(null)
+    setBusy(true)
+    try {
+      setClosingBalances(await getBalances(everyone.map((p) => p.uid)))
+      setSheet('summary')
+    } catch {
+      setClosingBalances({})
+      setSheet('summary')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function act(action: Action, quiet = false) {
     setErr(null)
@@ -472,6 +570,19 @@ export default function TablePage({ username }: Props) {
               {table.closedAt ? new Date(table.closedAt).toLocaleString() : ''}
             </p>
           </div>
+
+          <div className="card">
+            <h3>Final summary</h3>
+            <p className="tiny" style={{ marginTop: 0 }}>
+              Every player's balance when the table closed.
+            </p>
+            <div className="stack">
+              {summaryRows(finalBalances).map((r) => (
+                <SummaryRowItem key={r.uid} row={r} />
+              ))}
+            </div>
+          </div>
+
           {admin ? (
             <Link className="btn go block big" to={`/t/${table.code}/insights`}>
               Open insights
@@ -503,8 +614,9 @@ export default function TablePage({ username }: Props) {
               code {table.code} · {players.length}/{table.config.maxPlayers} seated
             </p>
             <p className="tiny">
-              You'll be credited <b>{table.config.joinerPoints}</b> points on your account, and you
-              need at least <b>{threshold}</b> to take a seat in each round.
+              Sitting down never adds points — your account balance starts at 0 and the admin adds
+              points to it from the dashboard. You need at least <b>{threshold}</b> points to take a
+              seat in each round.
               {phase === 'playing' && ' You are joining mid-round, so you sit out until the next one.'}
             </p>
           </div>
@@ -594,7 +706,8 @@ export default function TablePage({ username }: Props) {
         <div className="val">
           ₹{bet}
           <small>
-            {me.seen ? 'SEEN' : 'BLIND'} · min ₹{min} · you have ₹{maxBet}
+            {me.seen ? 'SEEN' : 'BLIND'} · min ₹{min} · put in ₹{putIn[username] ?? 0} · you have ₹
+            {maxBet}
           </small>
         </div>
         <button
@@ -689,6 +802,22 @@ export default function TablePage({ username }: Props) {
         </button>
       </div>
 
+      {!paused && (phase === 'countdown' || phase === 'playing' || phase === 'waiting') && admin && (
+        <div className="adminbar">
+          <span className="grow">
+            {phase === 'waiting'
+              ? 'The next round starts on its own.'
+              : phase === 'countdown'
+                ? 'The round is counting down.'
+                : 'Play is running.'}{' '}
+            Pause freezes every timer.
+          </span>
+          <button className="btn warn sm" disabled={busy} onClick={() => act({ type: 'pause', uid: username })}>
+            Pause game
+          </button>
+        </div>
+      )}
+
       {paused && (
         <div className="pausebar">
           <span>Paused by {table.adminUid === username ? 'you' : table.adminUid} — timers and play are frozen.</span>
@@ -779,6 +908,9 @@ export default function TablePage({ username }: Props) {
                   </span>
                 </div>
                 <span className="nm">{p.uid === username ? 'You' : p.username}</span>
+                {!!putIn[p.uid] && (
+                  <span className="badge putin">₹{putIn[p.uid]} in</span>
+                )}
                 {p.status === 'sittingOut' && <span className="badge">NEXT ROUND</span>}
                 {p.status === 'folded' && <span className="badge folded">OUT</span>}
                 {p.isAdmin && <span className="badge admin">ADMIN</span>}
@@ -984,7 +1116,25 @@ export default function TablePage({ username }: Props) {
         <div className="dock">
           {err && <div className="error">{err}</div>}
 
-          {paused ? (
+          {g.pending ? (
+            <div className="waiting">
+              <b>{g.pending.kind === 'show' ? 'Show' : 'Side show'}</b> vs{' '}
+              {g.pending.target === username ? g.pending.byName : g.pending.targetName} —{' '}
+              {g.pending.target === username
+                ? `${g.pending.byName} says ${g.pending.resultName} ${g.pending.kind === 'show' ? 'wins' : 'is out'}.`
+                : `waiting for ${g.pending.targetName} to answer…`}
+              {g.pending.by === username && (
+                <button
+                  className="btn sm"
+                  style={{ marginTop: 8 }}
+                  disabled={busy}
+                  onClick={() => act({ type: 'resolve', uid: username, accept: false }, true)}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          ) : paused ? (
             <div className="waiting">Paused — the admin will resume shortly.</div>
           ) : sittingOut ? (
             <div className="waiting">
@@ -1205,11 +1355,42 @@ export default function TablePage({ username }: Props) {
                 className="btn danger grow"
                 disabled={busy}
                 onClick={() => {
-                  setSheet(null)
-                  void act({ type: 'close', uid: username })
+                  void openSummary()
                 }}
               >
-                Stop table
+                {busy ? <span className="spin" /> : 'Review summary →'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sheet === 'summary' && (
+        <div className="sheetbg" onClick={() => setSheet(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <h3>Table summary</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              {table.name} · code {table.code} · {table.rounds} round{table.rounds === 1 ? '' : 's'}{' '}
+              played · everyone's balance right now.
+            </p>
+            <div className="stack">
+              {summaryRows(closingBalances).map((r) => (
+                <SummaryRowItem key={r.uid} row={r} />
+              ))}
+            </div>
+            <div className="row" style={{ gap: 8, marginTop: 12 }}>
+              <button className="btn grow" onClick={() => setSheet(null)}>
+                Keep playing
+              </button>
+              <button
+                className="btn danger grow"
+                disabled={busy}
+                onClick={async () => {
+                  // Only leave the summary once the close actually landed.
+                  if (await act({ type: 'close', uid: username })) setSheet(null)
+                }}
+              >
+                {busy ? <span className="spin" /> : 'Close table'}
               </button>
             </div>
           </div>
@@ -1319,8 +1500,10 @@ export default function TablePage({ username }: Props) {
           username={username}
           onClose={() => setSheet(null)}
           onPick={(uid) => {
+            const other = activePlayers.find((p) => p.uid !== username)
             setSheet(null)
-            void act({ type: 'selectWinner', uid: username, winnerUid: uid })
+            if (!other) return
+            void act({ type: 'propose', uid: username, kind: 'show', targetUid: other.uid, resultUid: uid })
           }}
         />
       )}
@@ -1332,10 +1515,49 @@ export default function TablePage({ username }: Props) {
           username={username}
           onClose={() => setSheet(null)}
           onPick={(uid) => {
+            const targetUid = sideTarget.uid
             setSheet(null)
-            void act({ type: 'sideshow', uid: username, loserUid: uid })
+            void act({ type: 'propose', uid: username, kind: 'sideshow', targetUid, resultUid: uid })
           }}
         />
+      )}
+
+      {sheet === 'propose' && g?.pending && g.pending.target === username && (
+        <div className="sheetbg">
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <h3>{g.pending.kind === 'show' ? 'Show' : 'Side show'}</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              <b>{g.pending.byName}</b> called a {g.pending.kind === 'show' ? 'show' : 'side show'}{' '}
+              and says <b>{g.pending.resultName}</b>{' '}
+              {g.pending.kind === 'show' ? 'wins the round.' : 'is out of the round.'}
+            </p>
+            <p className="tiny">
+              Accept to settle it that way. Decline leaves the round exactly as it is.
+            </p>
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                className="btn danger grow"
+                disabled={busy}
+                onClick={() => {
+                  setSheet(null)
+                  void act({ type: 'resolve', uid: username, accept: false }, true)
+                }}
+              >
+                Decline
+              </button>
+              <button
+                className="btn go grow"
+                disabled={busy}
+                onClick={() => {
+                  setSheet(null)
+                  void act({ type: 'resolve', uid: username, accept: true })
+                }}
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {sheet === 'leave' && (
@@ -1406,6 +1628,42 @@ function balanceHint(uid: string, balances: Record<string, number>, threshold: n
   const bal = balances[uid]
   if (typeof bal !== 'number' || bal >= threshold) return ''
   return ` (you have ${bal}, need ${threshold})`
+}
+
+/** One line of a closing summary: the balance right now, plus the net at this table. */
+interface SummaryRow {
+  uid: string
+  username: string
+  left: boolean
+  you: boolean
+  balance: number | null
+  net: number
+}
+
+function SummaryRowItem({ row }: { row: SummaryRow }) {
+  return (
+    <div className="topuprow">
+      <div className="grow">
+        <div style={{ fontWeight: 700 }}>
+          {row.you ? 'You' : row.username}
+          {row.left && <span className="tiny muted"> · left</span>}
+        </div>
+        <div className="tiny muted">
+          net at this table{' '}
+          <span className={`delta ${row.net >= 0 ? 'pos' : 'neg'}`}>
+            {row.net >= 0 ? '+' : ''}
+            {row.net}
+          </span>
+        </div>
+      </div>
+      <div style={{ textAlign: 'right' }}>
+        <div style={{ fontWeight: 800 }}>
+          {row.balance === null ? '—' : row.balance.toLocaleString()}
+        </div>
+        <div className="tiny muted">balance</div>
+      </div>
+    </div>
+  )
 }
 
 function PickSheet({

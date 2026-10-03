@@ -317,6 +317,10 @@ select.input { appearance: none; }
 .seat .badge.admin { background: rgba(245,179,1,.2); color: #ffdf95; border-color: rgba(245,179,1,.5); }
 .seat .badge.folded { background: rgba(255,93,108,.18); color: #ff9aa4; border-color: rgba(255,93,108,.45); }
 .seat .badge.net { background: rgba(6,12,22,.85); }
+.seat .badge.putin {
+  background: rgba(46,204,113,.16); color: #6ee7a2;
+  border-color: rgba(46,204,113,.45);
+}
 .seat .badge.net.pos { color: var(--green); border-color: rgba(34,197,94,.5); }
 .seat .badge.net.neg { color: var(--red); border-color: rgba(255,93,108,.5); }
 .netlbl { font-weight: 800; }
@@ -480,6 +484,7 @@ select.input { appearance: none; }
   .app.game .topbar,
   .app.game .pausebar,
   .app.game .warnbar,
+  .app.game .adminbar,
   .app.game .noticebar {
     flex: 1 0 100%;
   }
@@ -521,14 +526,15 @@ select.input { appearance: none; }
 }
 
 /* ---------- admin controls ---------- */
-.pausebar, .warnbar {
+.pausebar, .warnbar, .adminbar {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 14px; font-size: 13px; line-height: 1.35;
   border-bottom: 1px solid var(--line);
 }
 .pausebar { background: rgba(245, 179, 1, .14); color: var(--accent); }
-.pausebar span, .warnbar span { flex: 1; }
+.pausebar span, .warnbar span, .adminbar span { flex: 1; }
 .warnbar { background: rgba(255, 93, 108, .14); color: var(--red); }
+.adminbar { background: rgba(74, 163, 255, .10); color: #b9c4dc; }
 
 .stack { display: flex; flex-direction: column; gap: 8px; }
 

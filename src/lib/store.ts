@@ -104,10 +104,6 @@ export async function createTable(
         if (!mine.exists()) throw new Error('Your account could not be found.')
 
         const table = makeTable(code, name.trim() || `${creator}'s table`, creator, config)
-        const profile = mine.data() as UserDoc
-        profile.balance += config.joinerPoints
-        profile.stats.totalAllocated += config.joinerPoints
-        tx.set(userRef(creator), profile)
         tx.set(ref, { ...table })
       })
       return code
@@ -117,6 +113,33 @@ export async function createTable(
     }
   }
   throw new Error('Could not allocate a table code. Try again.')
+}
+
+/**
+ * Adds points to somebody else's account. This is how players get a balance at
+ * all — sitting at a table never credits anything. Returns null on success.
+ */
+export async function fundAccount(username: string, amount: number): Promise<string | null> {
+  guard()
+  const target = username.trim().toLowerCase()
+  const n = Math.floor(amount)
+  if (!target) return 'Enter a username.'
+  if (!Number.isFinite(n) || n < 1) return 'Enter an amount of at least 1.'
+  try {
+    return await runTransaction(db!, async (tx) => {
+      const ref = userRef(target)
+      const snap = await tx.get(ref)
+      if (!snap.exists()) return `No account named @${target}.`
+      const profile = snap.data() as UserDoc
+      profile.balance += n
+      // Written for accounts created before the field existed.
+      profile.stats = { ...profile.stats, totalFunded: (profile.stats.totalFunded ?? 0) + n }
+      tx.set(ref, profile)
+      return null
+    })
+  } catch (e) {
+    return e instanceof Error ? e.message : 'Could not add the points.'
+  }
 }
 
 /** Runs an action in a transaction and applies balance/history side effects. */

@@ -82,6 +82,7 @@ export async function signUp(username: string, password: string) {
       totalAllocated: 0,
       totalWon: 0,
       totalLost: 0,
+      totalFunded: 0,
     },
     history: [],
   }

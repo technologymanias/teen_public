@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { createTable, watchMyTables } from '../lib/store'
+import { createTable, fundAccount, watchMyTables } from '../lib/store'
+import { isAppAdmin } from '../lib/admins'
 import { DEFAULT_CONFIG, minBalanceToPlay, type TableConfig, type TableDoc, type UserDoc } from '../lib/types'
 
 interface Props {
@@ -17,6 +18,9 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [tables, setTables] = useState<TableDoc[]>([])
+  const [fundName, setFundName] = useState('')
+  const [fundAmount, setFundAmount] = useState(100)
+  const [fundedMsg, setFundedMsg] = useState<string | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -40,7 +44,7 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
     const floor = minBalanceToPlay(cfg)
     if (cfg.joinerPoints < floor) {
       setErr(
-        `Points for new joiners must be at least ${floor} — boot ${cfg.boot} + 2 × point ${cfg.baseUnit}.`
+        `Chips dealt each round must be at least ${floor} — boot ${cfg.boot} + 2 × point ${cfg.baseUnit}.`
       )
       return
     }
@@ -66,6 +70,30 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
     navigate(`/t/${c}`)
   }
 
+  async function onFund(e: FormEvent) {
+    e.preventDefault()
+    setErr(null)
+    setFundedMsg(null)
+    setBusy(true)
+    try {
+      const problem = await fundAccount(fundName, Number(fundAmount))
+      if (problem) {
+        setErr(problem)
+        return
+      }
+      setFundedMsg(`${fundAmount} points added to @${fundName.trim().toLowerCase()}.`)
+      setFundName('')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const appAdmin = isAppAdmin(username)
+  /** Everyone I've shared a table with, for one-tap funding. */
+  const known = [...new Set(tables.flatMap((t) => t.memberUids))]
+    .filter((u) => u !== username)
+    .sort()
+
   const s = profile?.stats
   const balance = profile?.balance ?? 0
   const floor = minBalanceToPlay(config())
@@ -85,7 +113,7 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
     <div className="app">
       <div className="topbar">
         <span className="brand" style={{ fontSize: 17 }}>
-          Teen Patti Points
+          Game Points
         </span>
         <div className="grow" />
         <button className="btn ghost sm" onClick={onLogout}>
@@ -142,6 +170,61 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
           </div>
         </div>
 
+        {appAdmin && (
+          <form className="card" onSubmit={onFund}>
+            <h3>Add points to a player</h3>
+            <p className="tiny" style={{ marginTop: 0 }}>
+              Sitting at a table never credits points — every balance starts at 0 and is topped up
+              from here.
+            </p>
+            <div className="cfggrid">
+              <div className="field">
+                <label>Username</label>
+                <input
+                  className="input"
+                  placeholder="who to fund"
+                  value={fundName}
+                  onChange={(e) => setFundName(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>Points</label>
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  value={fundAmount}
+                  onChange={(e) => setFundAmount(Math.floor(Number(e.target.value) || 0))}
+                />
+              </div>
+            </div>
+            {known.length > 0 && (
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                {known.map((u) => (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    key={u}
+                    onClick={() => setFundName(u)}
+                  >
+                    {u}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button className="btn primary block" style={{ marginTop: 10 }} disabled={busy} type="submit">
+              {busy ? <span className="spin" /> : 'Add points'}
+            </button>
+            {fundedMsg && <div className="success">{fundedMsg}</div>}
+            {(s?.totalFunded ?? 0) > 0 && (
+              <p className="tiny" style={{ marginBottom: 0 }}>
+                You have added {(s?.totalFunded ?? 0).toLocaleString()} points in total.
+              </p>
+            )}
+          </form>
+        )}
+
         {(open.length > 0 || closed.length > 0) && (
           <div className="card">
             <h3>Your tables</h3>
@@ -175,6 +258,24 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
           </div>
         )}
 
+        <form className="card" onSubmit={onJoin}>
+          <h3>Join a table</h3>
+          <div className="row" style={{ gap: 8 }}>
+            <input
+              className="input grow center"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="6-digit code"
+              style={{ letterSpacing: 6, fontWeight: 800, textAlign: 'center' }}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            />
+            <button className="btn go" type="submit">
+              Join
+            </button>
+          </div>
+        </form>
+
         <form className="card" onSubmit={onCreate}>
           <h3>Create a table</h3>
           <div className="field">
@@ -188,7 +289,7 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
           </div>
           <div className="cfggrid" style={{ marginTop: 10 }}>
             <div className="field">
-              <label>Points for new joiners</label>
+              <label>Chips dealt each round</label>
               <input
                 className="input"
                 type="number"
@@ -211,31 +312,13 @@ export default function DashboardPage({ username, profile, onLogout }: Props) {
             </div>
           </div>
           <p className="tiny">
-            Everyone gets {joinerPoints} points on their account when they sit down, then each round
-            hands out {joinerPoints} chips and {boot} of them drops into the centre. Anyone below{' '}
-            {floor} points sits out until the admin tops them up.
+            Each round hands every player {joinerPoints} chips and {boot} of them drops into the
+            centre. Sitting down never adds points — players need at least {floor} points in their
+            account to take a seat, so fund them from this dashboard first.
           </p>
           <button className="btn primary block" disabled={busy} type="submit">
             {busy ? <span className="spin" /> : 'Create table'}
           </button>
-        </form>
-
-        <form className="card" onSubmit={onJoin}>
-          <h3>Join a table</h3>
-          <div className="row" style={{ gap: 8 }}>
-            <input
-              className="input grow center"
-              inputMode="numeric"
-              maxLength={6}
-              placeholder="6-digit code"
-              style={{ letterSpacing: 6, fontWeight: 800, textAlign: 'center' }}
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-            />
-            <button className="btn go" type="submit">
-              Join
-            </button>
-          </div>
         </form>
 
         {err && <div className="error">{err}</div>}

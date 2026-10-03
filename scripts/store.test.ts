@@ -38,6 +38,7 @@ function profile(name: string, balance: number): UserDoc {
       totalAllocated: 0,
       totalWon: 0,
       totalLost: 0,
+      totalFunded: 0,
     },
     history: [],
   }
@@ -86,17 +87,19 @@ function run(t: TableDoc, profiles: Map<string, UserDoc>, ...actions: Action[]):
 const profiles = new Map<string, UserDoc>()
 let t = makeTable('111111', 'Table', 'alice')
 
-// The store credits the creator the same way a seat-down does.
-profiles.set('alice', profile('alice', STARTING_BALANCE))
-profiles.get('alice')!.balance += DEFAULT_CONFIG.joinerPoints
+// Everybody signs up at 0 and is funded from the dashboard before playing.
+for (const u of ['alice', 'bob', 'carol']) profiles.set(u, profile(u, STARTING_BALANCE))
 
 t = run(t, profiles, { type: 'config', uid: 'alice', config: { joinerPoints: 100, boot: 10, baseUnit: 10 } })
 t = run(t, profiles, { type: 'join', uid: 'bob', username: 'bob' })
 t = run(t, profiles, { type: 'join', uid: 'carol', username: 'carol' })
 
-ok(profiles.get('bob')!.balance === STARTING_BALANCE + 100, 'bob credited joiner points on sitting down')
-ok(profiles.get('carol')!.balance === STARTING_BALANCE + 100, 'carol credited joiner points')
-ok(profiles.get('bob')!.stats.totalAllocated === 100, 'join counts toward points played')
+ok(profiles.get('bob')!.balance === STARTING_BALANCE, 'sitting down credits nothing')
+ok(profiles.get('carol')!.balance === STARTING_BALANCE, 'sitting down credits nothing')
+ok(profiles.get('bob')!.stats.totalAllocated === 0, 'nothing is allocated on join')
+
+const FUNDED = 200
+for (const u of ['alice', 'bob', 'carol']) profiles.get(u)!.balance = STARTING_BALANCE + FUNDED
 
 const startRes = applyWithProfiles(t, { type: 'start', uid: 'alice' }, profiles)
 t = startRes.table
@@ -111,7 +114,7 @@ ok(
   'round chips are granted without touching the balance'
 )
 ok(t.game.pot === 30, `boot collected into the pot (got ${t.game.pot})`)
-ok(profiles.get('bob')!.balance === STARTING_BALANCE + 100, 'grant does not move the balance')
+ok(profiles.get('bob')!.balance === STARTING_BALANCE + FUNDED, 'grant does not move the balance')
 
 // alice bets, bob folds, carol still active => alice stops the round then names herself
 t = run(t, profiles, { type: 'bet', uid: 'alice', amount: 10 })
@@ -131,19 +134,20 @@ const a = profiles.get('alice')!
 const b = profiles.get('bob')!
 const c = profiles.get('carol')!
 
-// alice: +100 to sit down, then round delta = +20 (bob 10 + carol 10 pot, alice paid 20 boot+bet but took 30)
-ok(a.balance === STARTING_BALANCE + 100 + 20, `alice balance = 120 (got ${a.balance})`)
+// alice: round delta = +20 (bob 10 + carol 10 pot, alice paid 20 boot+bet but took 30)
+ok(a.balance === STARTING_BALANCE + FUNDED + 20, `alice balance = 220 (got ${a.balance})`)
 ok(a.stats.gamesPlayed === 1 && a.stats.gamesWon === 1, 'alice counted as a win')
 ok(a.stats.totalWon === 20, `alice totalWon 20 (got ${a.stats.totalWon})`)
 ok(a.history.length === 1 && a.history[0].result === 'won', 'alice history records won')
 
-ok(b.balance === STARTING_BALANCE + 100 - 10, `bob net -10 (got ${b.balance - STARTING_BALANCE})`)
-ok(c.balance === STARTING_BALANCE + 100 - 10, `carol net -10 (got ${c.balance - STARTING_BALANCE})`)
+ok(b.balance === STARTING_BALANCE + FUNDED - 10, `bob net -10 (got ${b.balance - STARTING_BALANCE - FUNDED})`)
+ok(c.balance === STARTING_BALANCE + FUNDED - 10, `carol net -10 (got ${c.balance - STARTING_BALANCE - FUNDED})`)
 ok(b.stats.gamesLost === 1 && b.stats.totalLost === 10, 'bob loss tracked')
 ok(b.history[0].result === 'folded', 'bob history records folded')
 
-// Every round's deltas net to zero, even though joining credits points.
-const deltas = [a, b, c].map((p) => p.balance - (STARTING_BALANCE + DEFAULT_CONFIG.joinerPoints))
+// Every round's deltas net to zero — funding is the only thing that moves the
+// balance outside a round.
+const deltas = [a, b, c].map((p) => p.balance - (STARTING_BALANCE + FUNDED))
 ok(
   deltas[0] + deltas[1] + deltas[2] === 0,
   `rounds are zero-sum (got ${deltas[0] + deltas[1] + deltas[2]})`
@@ -155,11 +159,13 @@ ok(t.rounds === 1, 'table counted one round')
 // ============ admin top-up credits the account ============
 const top = applyWithProfiles(t, { type: 'topup', uid: 'alice', targetUid: 'bob', amount: 40 }, profiles)
 ok(top.effects.some((e) => e.type === 'grant' && e.entries.some((x) => x.creditBalance)), 'top-up credits balance')
-ok(profiles.get('bob')!.balance === STARTING_BALANCE + 100 - 10 + 40, 'bob balance after top-up')
+ok(profiles.get('bob')!.balance === STARTING_BALANCE + FUNDED - 10 + 40, 'bob balance after top-up')
 
 // ============ a player below the floor sits out ============
 const shortProfiles = new Map<string, UserDoc>()
 shortProfiles.set('adm', profile('adm', 100))
+shortProfiles.set('rich', profile('rich', 400))
+shortProfiles.set('poor', profile('poor', 12))
 let s = makeTable('222222', 'Short', 'adm')
 s = run(s, shortProfiles, { type: 'join', uid: 'rich', username: 'rich' })
 s = run(s, shortProfiles, { type: 'join', uid: 'poor', username: 'poor' })
@@ -243,7 +249,10 @@ ok(heavy.history[0].tableCode === '2', 'newest entry is first')
 
 // ============ stopping the table keeps balances where they are ============
 let c2 = makeTable('333333', 'Close', 'admin')
-const cp = new Map<string, UserDoc>([['admin', profile('admin', STARTING_BALANCE + 100)]])
+const cp = new Map<string, UserDoc>([
+  ['admin', profile('admin', STARTING_BALANCE + 200)],
+  ['p2', profile('p2', STARTING_BALANCE + 200)],
+])
 c2 = run(c2, cp, { type: 'join', uid: 'p2', username: 'p2' }, { type: 'start', uid: 'admin' })
 tick(START_DELAY_MS + 10)
 c2 = run(c2, cp, { type: 'beginRound', uid: 'admin' })

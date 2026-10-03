@@ -258,22 +258,16 @@ let t6 = makeTable('444', 'T6', 'a')
 t6 = run(t6, { type: 'config', uid: 'a', config: { maxPlayers: 2 } }, { type: 'join', uid: 'b', username: 'b' })
 ok(!!applyAction(t6, { type: 'join', uid: 'c', username: 'c' }).error, 'max players enforced')
 
-// --- join credits the joiner exactly once ---
+// --- sitting down never credits points; the admin funds the account ---
 let tj = makeTable('666', 'TJ', 'admin')
 const j1 = applyAction(tj, { type: 'join', uid: 'neo', username: 'neo' })
-ok(
-  j1.effects.some(
-    (e) => e.type === 'grant' && e.entries.some((x) => x.username === 'neo' && x.creditBalance && x.amount === DEFAULT_CONFIG.joinerPoints)
-  ),
-  'join credits joinerPoints to the account'
-)
+ok(!j1.error, 'joining is allowed')
+ok(j1.effects.length === 0, 'joining credits nothing')
+ok(byUid(j1.table, 'neo')!.chips === 0, 'a new seat starts with no chips')
 tj = j1.table
 tj = run(tj, { type: 'leave', uid: 'neo' })
 const j2 = applyAction(tj, { type: 'join', uid: 'neo', username: 'neo' })
-ok(
-  j2.effects.every((e) => e.type !== 'grant' || !e.entries.some((x) => x.creditBalance)),
-  'rejoining the same table does not credit again'
-)
+ok(j2.effects.length === 0, 'rejoining credits nothing either')
 
 // --- low balance sits the player out when the round starts ---
 let t8 = makeTable('777', 'T8', 'adm')
@@ -486,6 +480,7 @@ strip(legacy as unknown as Record<string, unknown>, 'actionHistory')
 strip(legacy as unknown as Record<string, unknown>, 'actionSeq')
 strip(legacy.game as unknown as Record<string, unknown>, 'notice')
 strip(legacy.game as unknown as Record<string, unknown>, 'endedBy')
+strip(legacy.game as unknown as Record<string, unknown>, 'pending')
 strip(legacy.game as unknown as Record<string, unknown>, 'roundStartedAt')
 strip(legacy.config as unknown as Record<string, unknown>, 'forcedSeenRounds')
 for (const p of legacy.players) strip(p as unknown as Record<string, unknown>, 'blindTurns')
@@ -494,7 +489,98 @@ ok(!lr.error, `a legacy document without the new fields still works (${lr.error 
 ok(lr.table.roundHistory.length === 0 && lr.table.actionHistory.length === 0, 'legacy history defaults to empty')
 ok(lr.table.config.forcedSeenRounds === DEFAULT_CONFIG.forcedSeenRounds, 'legacy config gains the new default')
 ok(lr.table.players.every((p) => p.blindTurns === 0), 'legacy players gain a blind counter')
+ok(lr.table.game.pending === null, 'a legacy game gains an empty confirmation hold')
 clean('a legacy document', lr.table)
+
+// ============ a show / side show has to be confirmed by the other player ============
+// Three players: a side show can be called.
+let ps = makeTable('555001', 'Confirm', 'alice')
+ps = run(
+  ps,
+  { type: 'join', uid: 'bob', username: 'bob' },
+  { type: 'join', uid: 'carol', username: 'carol' },
+  { type: 'start', uid: 'alice' }
+)
+ps = startRound(ps, 'alice')
+ok(ps.game.turnUid === 'alice', 'alice acts first at the confirm table')
+
+ok(
+  !!applyAction(ps, { type: 'propose', uid: 'bob', kind: 'sideshow', targetUid: 'carol', resultUid: 'bob' }).error,
+  'only the player on turn can propose'
+)
+ok(
+  !!applyAction(ps, { type: 'propose', uid: 'alice', kind: 'show', targetUid: 'bob', resultUid: 'alice' }).error,
+  'a show needs exactly two players left'
+)
+
+const sideProp = applyAction(ps, {
+  type: 'propose',
+  uid: 'alice',
+  kind: 'sideshow',
+  targetUid: 'carol',
+  resultUid: 'carol',
+})
+ok(!sideProp.error, `a side show can be proposed (${sideProp.error ?? 'ok'})`)
+ok(sideProp.table.game.pending?.target === 'carol', 'the offer lands on the other player')
+ok(sideProp.table.game.pending?.resultUid === 'carol', 'the offer carries the named result')
+ok(sideProp.effects.length === 0, 'proposing settles nothing')
+ps = sideProp.table
+clean('a table with an offer up', ps)
+
+ok(!!applyAction(ps, { type: 'bet', uid: 'alice', amount: 10 }).error, 'bets are frozen while an offer is up')
+ok(
+  !!applyAction(ps, { type: 'resolve', uid: 'bob', accept: true }).error,
+  'a player outside the show cannot answer it'
+)
+ok(
+  !!applyAction(ps, { type: 'resolve', uid: 'alice', accept: true }).error,
+  'the caller cannot accept their own offer'
+)
+
+const declined = applyAction(ps, { type: 'resolve', uid: 'carol', accept: false })
+ok(!declined.error, `the other player may decline (${declined.error ?? 'ok'})`)
+ok(declined.table.game.pending === null, 'declining clears the offer')
+ok(declined.table.game.phase === 'playing', 'declining leaves the round running')
+ok(declined.effects.length === 0, 'declining settles nothing')
+ok(byUid(declined.table, 'carol')!.status === 'active', 'declining folds nobody')
+ps = declined.table
+
+const sideAgain = applyAction(ps, {
+  type: 'propose',
+  uid: 'alice',
+  kind: 'sideshow',
+  targetUid: 'carol',
+  resultUid: 'carol',
+})
+ok(!sideAgain.error, 'the offer can be made again after a decline')
+ps = sideAgain.table
+const accepted = applyAction(ps, { type: 'resolve', uid: 'carol', accept: true })
+ok(!accepted.error, `the other player may accept (${accepted.error ?? 'ok'})`)
+ok(accepted.table.game.pending === null, 'accepting clears the offer')
+ok(byUid(accepted.table, 'carol')!.status === 'folded', 'accepting puts the named loser out')
+ok(accepted.table.game.phase === 'playing', 'the round carries on with two players left')
+
+// Two players: a heads-up show.
+let sh = makeTable('555002', 'Show', 'alice')
+sh = run(sh, { type: 'join', uid: 'bob', username: 'bob' }, { type: 'start', uid: 'alice' })
+sh = startRound(sh, 'alice')
+const showProp = applyAction(sh, { type: 'propose', uid: 'alice', kind: 'show', targetUid: 'bob', resultUid: 'alice' })
+ok(!showProp.error, `a heads-up show can be proposed (${showProp.error ?? 'ok'})`)
+ok(showProp.table.game.pending?.target === 'bob', 'the show lands on the other player')
+sh = showProp.table
+
+const showDeclined = applyAction(sh, { type: 'resolve', uid: 'bob', accept: false })
+ok(showDeclined.table.game.phase === 'playing', 'a declined show keeps the round going')
+ok(showDeclined.table.game.winnerUid === null, 'a declined show picks nobody')
+
+sh = showDeclined.table
+sh = run(sh, { type: 'propose', uid: 'alice', kind: 'show', targetUid: 'bob', resultUid: 'alice' })
+const showAccepted = applyAction(sh, { type: 'resolve', uid: 'bob', accept: true })
+ok(!showAccepted.error, `an accepted show settles (${showAccepted.error ?? 'ok'})`)
+ok(showAccepted.table.game.phase === 'waiting', 'an accepted show ends the round')
+ok(showAccepted.table.game.winnerUid === 'alice', 'the named winner takes the pot')
+ok(showAccepted.table.game.pending === null, 'an accepted show clears the offer')
+clean('after an accepted show', showAccepted.table)
 
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)
